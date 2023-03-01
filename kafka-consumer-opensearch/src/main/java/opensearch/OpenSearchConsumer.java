@@ -11,11 +11,11 @@ import org.apache.kafka.clients.CommonClientConfigs;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.errors.WakeupException;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.opensearch.action.bulk.BulkRequest;
 import org.opensearch.action.bulk.BulkResponse;
 import org.opensearch.action.index.IndexRequest;
-import org.opensearch.action.index.IndexResponse;
 import org.opensearch.client.RequestOptions;
 import org.opensearch.client.RestClient;
 import org.opensearch.client.RestHighLevelClient;
@@ -42,6 +42,24 @@ public class OpenSearchConsumer {
         RestHighLevelClient openSearchClient = createOpenSearchClient();
 
         KafkaConsumer<String, String> consumer = createKafkaConsumer();
+
+        // get a reference to the main thread
+        final Thread mainThread = Thread.currentThread();
+
+        // adding the shutdown hook
+        Runtime.getRuntime().addShutdownHook(new Thread() {
+            public void run() {
+                log.info("Detected a shutdown, let's exit by calling consumer.wakeup()...");
+                consumer.wakeup();
+
+                // join the main thread to allow the execution of the code in the main thread
+                try {
+                    mainThread.join();
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+            }
+        });
 
         try (openSearchClient; consumer) {
             boolean existsIndex = openSearchClient.indices().exists(new GetIndexRequest(indexName), RequestOptions.DEFAULT);
@@ -74,13 +92,13 @@ public class OpenSearchConsumer {
                     }
                 }
 
-                if(bulkRequest.numberOfActions()>0){
+                if (bulkRequest.numberOfActions() > 0) {
                     BulkResponse bulkResponse = openSearchClient.bulk(bulkRequest, RequestOptions.DEFAULT);
                     log.info("inserted " + bulkResponse.getItems().length + " records");
 
                     try {
                         Thread.sleep(1000);
-                    }catch (Exception e){
+                    } catch (Exception e) {
                         e.printStackTrace();
                     }
 
@@ -91,6 +109,15 @@ public class OpenSearchConsumer {
 
 
             }
+        } catch (
+                WakeupException e) {
+            log.info("Consumer is starting to shut down");
+        } catch (Exception e) {
+            log.error("Unexpected exception in the consumer", e);
+        } finally {
+            consumer.close(); // close the consumer, this will also commit offsets
+            openSearchClient.close();
+            log.info("The consumer is now gracefully shut down");
         }
     }
 
