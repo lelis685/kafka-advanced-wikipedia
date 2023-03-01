@@ -1,5 +1,6 @@
 package opensearch;
 
+import com.google.gson.JsonParser;
 import org.apache.http.HttpHost;
 import org.apache.http.auth.AuthScope;
 import org.apache.http.auth.UsernamePasswordCredentials;
@@ -8,12 +9,11 @@ import org.apache.http.impl.client.BasicCredentialsProvider;
 import org.apache.http.impl.client.DefaultConnectionKeepAliveStrategy;
 import org.apache.kafka.clients.CommonClientConfigs;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
-import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.StringDeserializer;
-import org.apache.kafka.common.serialization.StringSerializer;
+import org.opensearch.action.bulk.BulkRequest;
+import org.opensearch.action.bulk.BulkResponse;
 import org.opensearch.action.index.IndexRequest;
 import org.opensearch.action.index.IndexResponse;
 import org.opensearch.client.RequestOptions;
@@ -53,26 +53,54 @@ public class OpenSearchConsumer {
 
             consumer.subscribe(List.of("wikimedia.recentchange"));
 
-
-            while(true){
+            while (true) {
                 ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(3000));
                 log.info("Received " + records.count() + " records");
 
-                for(var record : records){
+                BulkRequest bulkRequest = new BulkRequest();
 
-                    IndexRequest indexRequest = new IndexRequest(indexName)
-                            .source(record.value(), XContentType.JSON);
+                for (var record : records) {
 
-                    IndexResponse indexResponse = openSearchClient.index(indexRequest, RequestOptions.DEFAULT);
-                    log.info(indexResponse.getId());
+                    try {
+                        String id = extractId(record.value());
+
+                        IndexRequest indexRequest = new IndexRequest(indexName)
+                                .source(record.value(), XContentType.JSON)
+                                .id(id);
+
+                        bulkRequest.add(indexRequest);
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
+                }
+
+                if(bulkRequest.numberOfActions()>0){
+                    BulkResponse bulkResponse = openSearchClient.bulk(bulkRequest, RequestOptions.DEFAULT);
+                    log.info("inserted " + bulkResponse.getItems().length + " records");
+
+                    try {
+                        Thread.sleep(1000);
+                    }catch (Exception e){
+                        e.printStackTrace();
+                    }
+
+                    consumer.commitAsync();
+                    log.info("offsets committed");
 
                 }
 
+
             }
-
         }
+    }
 
-
+    private static String extractId(String json) {
+        return JsonParser.parseString(json)
+                .getAsJsonObject()
+                .get("meta")
+                .getAsJsonObject()
+                .get("id")
+                .getAsString();
     }
 
     private static KafkaConsumer<String, String> createKafkaConsumer() {
@@ -85,6 +113,7 @@ public class OpenSearchConsumer {
         properties.setProperty(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
         properties.setProperty(ConsumerConfig.GROUP_ID_CONFIG, groupId);
         properties.setProperty(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        properties.setProperty(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
 
         // create consumer
         return new KafkaConsumer<>(properties);
@@ -122,7 +151,6 @@ public class OpenSearchConsumer {
 
         return restHighLevelClient;
     }
-
 
 
 }
